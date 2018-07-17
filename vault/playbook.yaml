@@ -1,0 +1,61 @@
+- hosts: vault
+  vars:
+    vault:
+      url: https://VAULT:8200
+      token: 16687485-f3c6-ac40-bbeb-8412c362045d
+      ttl: 8760h
+      pki_role: myapp
+      CA_chain: [rootca, pki]
+    tls:
+      keystore: /tmp/server.keystore.jks
+      truststore: /tmp/server.truststore.jks
+      keystorepass: mypass
+      truststorepass: mypass
+  tasks:
+    - name: Clean CAbundle file
+      file:
+        state: absent
+        path: /tmp/CAbundle.pem
+    - include_tasks: 'CAchain.yaml'
+      with_items: "{{ vault.CA_chain }}"
+      loop_control:
+        loop_var: path
+    - name: jq file check
+      stat:
+        path: /usr/local/bin/jq
+      register: p
+    - debug: var=p
+    - name: install jq 
+      yum:
+        name: jq
+        state: present
+      when: not p.stat.exists
+    - name: "Check Cert expiry"
+      shell: "keytool -exportcert -rfc -alias {{ inventory_hostname_short }} -keystore {{ tls.keystore }} -storepass {{ tls.keystorepass }} | openssl x509 -checkend 0"
+      register: expr
+      run_once: true
+      ignore_errors: yes
+    - debug: var=expr
+    - name: "Get signed cert"
+      uri: 
+        url: "{{ vault.url }}/v1/pki/issue/{{ vault.pki_role }}"
+        method: POST
+        validate_certs: no
+        HEADER_Content-Type: "application/json"
+        HEADER_X-Vault-Token: "{{ vault.token }}"
+        return_content: yes
+        body: { "common_name": "{{ inventory_hostname }}", "format": "pem", "ttl": "{{ vault.ttl }}" }
+        body_format: json
+        dest: "/tmp/{{ inventory_hostname }}.json"
+      when: not expr.rc == 0
+    - name: "Extract cert + private key"
+      shell: "cat /tmp/{{ inventory_hostname }}.json | jq -r .data.certificate > /tmp/{{ inventory_hostname }}.cer; cat /tmp/{{ inventory_hostname }}.json | jq -r .data.private_key > /tmp/{{ inventory_hostname }}.key"
+      when: not expr.rc == 0
+    - name: "Create pkcs12 bundle"
+      shell: "cd /tmp; openssl pkcs12 -export -in {{ inventory_hostname }}.cer -inkey {{ inventory_hostname }}.key -chain -CAfile CAbundle.pem -name '{{ inventory_hostname_short }}' -out {{ inventory_hostname_short }}.keystore.p12 -password pass:{{ tls.keystorepass }}"
+      when: not expr.rc == 0
+    - name: "Convert pkcs12 bundle"
+      shell: "cd /tmp; keytool -importkeystore -noprompt -deststorepass {{ tls.keystorepass }} -srcstorepass {{ tls.keystorepass }} -destkeystore {{ tls.keystore }} -srckeystore {{ inventory_hostname_short }}.keystore.p12 -srcstoretype PKCS12"
+      when: not expr.rc == 0
+    - name: Clean up working files
+      shell: "rm -f /tmp/*.{pem,p12,json,key,cer}"

@@ -1,0 +1,19 @@
+---  
+- name: "Fetch CA cert {{ path }}"
+  get_url:
+    url: "{{ vault.url }}/v1/{{ path }}/ca/pem"
+    dest: "/tmp/{{ path }}.pem"
+    validate_certs: no
+- name: "Check if Cert already exists in truststore"
+  shell: "keytool -list -v -keystore {{ tls.truststore }} -storepass {{ tls.truststorepass }} -alias {{ path }}"
+  register: isthere
+  run_once: true
+  ignore_errors: yes
+- name: "import cert {{ path }} into truststore"
+  shell: "cat /tmp/{{ path }}.pem | keytool -import -v -alias {{ path }} -keystore {{ tls.truststore }} -storepass {{ tls.truststorepass }} -noprompt"
+  when: not isthere.rc == 0
+- name: print cmd
+  debug:
+    msg: "keytool -list -v -keystore {{ tls.truststore }} -storepass {{ tls.truststorepass }} -alias {{ path }}"
+- name: "Add {{ path }} to CA bundle"
+  shell: cat "/tmp/{{ path }}.pem" >> /tmp/CAbundle.pem
